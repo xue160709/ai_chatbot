@@ -6,6 +6,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
+import { RssFeedButton, type Feed } from "@/components/ui/rss-feed-button"
 
 // 定义消息类型
 interface Message {
@@ -21,41 +22,33 @@ const initialMessages: Message[] = []
 const SILICON_API_KEY = "sk-muldrtvvuufghlgmrukdkwmibmeaemlnbdpyyuqbyknfsjcf"
 const API_URL = 'https://api.siliconflow.cn/v1/chat/completions'
 
-// 添加System Prompt
-const SYSTEM_PROMPT = `你是一位经验丰富的产品经理顾问，专注于帮助用户解决产品设计和管理相关的问题。你具备以下特点和能力：
+// 添加新的System Prompt for RSS
+const RSS_SYSTEM_PROMPT = `你是一位专业的新闻编辑和分析师，你的任务是对RSS新闻源进行简明扼要的总结。请遵循以下原则：
 
-1. 专业知识：
-   - 精通产品生命周期管理
-   - 熟悉用户研究和需求分析
-   - 擅长产品策略制定和路线图规划
-   - 了解敏捷开发和项目管理方法论
+1. 总结要求：
+   - 提取最重要和最有价值的信息
+   - 按主题分类整理
+   - 突出时效性强的新闻
+   - 去除重复信息
 
-2. 解决问题方法：
-   - 始终以用户为中心
-   - 基于数据驱动决策
-   - 注重商业价值和可行性
-   - 提供具体、可执行的建议
+2. 输出格式：
+   - 用简短的要点列表形式
+   - 每个要点不超过2行
+   - 相似主题合并处理
+   - 保持客观中立的语气
 
-3. 回答风格：
-   - 结构化和系统性的思考
-   - 使用专业的产品经理术语
-   - 提供实际案例和最佳实践
-   - 引导式提问帮助明确需求
+3. 重点关注：
+   - 重大事件和突发新闻
+   - 行业趋势和变化
+   - 具有实质性影响的发展
 
-4. 专长领域：
-   - 产品定位和市场分析
-   - 用户故事和需求文档编写
-   - 产品原型设计
-   - 数据分析和决策
-   - 跨团队协作
-   - 产品发布和迭代优化
-
-请用专业、清晰和建设性的方式回答用户的产品相关问题。`
+请用精炼的语言输出总结，确保信息既完整又简洁。`
 
 export function ChatInterface() {
   const [messages, setMessages] = useState<Message[]>(initialMessages)
   const [input, setInput] = useState("")
   const [isLoading, setIsLoading] = useState(false)
+  const [showRssFeed, setShowRssFeed] = useState(false)
 
   // 修改API调用函数以支持流式输出
   const callSiliconFlowAPI = async (userMessage: string, onChunk: (chunk: string) => void) => {
@@ -71,7 +64,7 @@ export function ChatInterface() {
           messages: [
             {
               role: 'system',
-              content: SYSTEM_PROMPT
+              content: RSS_SYSTEM_PROMPT
             },
             ...messages.map(msg => ({
               role: msg.role === 'user' ? 'user' : 'assistant',
@@ -176,83 +169,196 @@ export function ChatInterface() {
     setMessages([])
   }
 
-  return (
-    <div className="flex h-screen flex-col bg-gray-50">
-      {/* 顶部导航栏 */}
-      <div className="flex items-center justify-between border-b bg-white px-6 py-4">
-        <div className="flex items-center gap-2">
-          <Bot className="h-6 w-6 text-primary" />
-          <h1 className="text-lg font-semibold">AI 助手</h1>
-        </div>
-        <Button variant="outline" size="sm" onClick={handleNewChat}>
-          新对话
-        </Button>
-      </div>
+  // 处理RSS内容的函数
+  const handleRssFeedsFetched = (feeds: Feed[]) => {
+    console.log('RSS feeds fetched:', feeds)
+  }
 
-      {/* 聊天区域 */}
-      <ScrollArea className="flex-1 px-4 py-6">
-        <div className="mx-auto max-w-3xl space-y-6">
-          {messages.map((message) => (
-            <div
-              key={message.id}
-              className={cn(
-                "flex items-start gap-3",
-                message.role === "assistant" ? "justify-start" : "justify-end"
-              )}
+  const handleRssToLLM = async (formattedContent: string) => {
+    setIsLoading(true)
+
+    try {
+      const response = await fetch(API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${SILICON_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: "deepseek-ai/DeepSeek-R1",
+          messages: [
+            {
+              role: 'system',
+              content: RSS_SYSTEM_PROMPT
+            },
+            {
+              role: 'user',
+              content: formattedContent
+            }
+          ],
+          stream: true,
+          max_tokens: 1000
+        })
+      })
+
+      if (!response.ok) {
+        throw new Error('API请求失败')
+      }
+
+      const reader = response.body?.getReader()
+      const decoder = new TextDecoder()
+
+      if (!reader) {
+        throw new Error('无法获取响应流')
+      }
+
+      // 创建新的assistant消息
+      const newMessageId = Date.now()
+      setMessages(prev => [...prev, {
+        id: newMessageId,
+        role: "assistant",
+        content: ""
+      }])
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        const chunk = decoder.decode(value)
+        const lines = chunk.split('\n').filter(line => line.trim() !== '')
+        
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const jsonString = line.slice(6)
+            if (jsonString === '[DONE]') continue
+            
+            try {
+              const jsonData = JSON.parse(jsonString)
+              const content = jsonData.choices[0]?.delta?.content
+              if (content) {
+                setMessages(prev => {
+                  const lastMessage = prev[prev.length - 1]
+                  if (lastMessage && lastMessage.id === newMessageId) {
+                    return [
+                      ...prev.slice(0, -1),
+                      { ...lastMessage, content: lastMessage.content + content }
+                    ]
+                  }
+                  return prev
+                })
+              }
+            } catch (e) {
+              console.error('JSON解析错误:', e)
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error('API调用错误:', error)
+      setMessages(prev => [
+        ...prev,
+        {
+          id: Date.now(),
+          role: "assistant",
+          content: "抱歉，处理RSS内容时遇到了问题，请稍后再试。"
+        }
+      ])
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  return (
+    <div className="flex h-[calc(100vh-3.5rem)] flex-col space-y-4">
+      {/* 主聊天区域 */}
+      <div className="flex-1 flex flex-col bg-gray-50">
+        {/* 顶部导航栏 */}
+        <div className="flex items-center justify-between border-b bg-white px-6 py-4">
+          <div className="flex items-center gap-2">
+            <Bot className="h-6 w-6 text-primary" />
+            <h1 className="text-lg font-semibold">AI 助手</h1>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button onClick={handleNewChat} size="icon" variant="ghost">
+              <Plus className="h-4 w-4" />
+            </Button>
+            <RssFeedButton 
+              onFeedsFetched={handleRssFeedsFetched} 
+              onSendToLLM={handleRssToLLM}
+              variant="outline"
+              size="sm"
+              className="flex items-center gap-1"
             >
-              {message.role === "assistant" && (
-                <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary text-primary-foreground">
-                  <Bot className="h-5 w-5" />
-                </div>
-              )}
+              <Search className="h-4 w-4" />
+              RSS订阅
+            </RssFeedButton>
+          </div>
+        </div>
+
+        {/* 聊天区域 */}
+        <ScrollArea className="flex-1 px-4 py-6">
+          <div className="mx-auto max-w-3xl space-y-6">
+            {messages.map((message) => (
               <div
+                key={message.id}
                 className={cn(
-                  "max-w-[80%] rounded-2xl px-4 py-3",
-                  message.role === "assistant"
-                    ? "bg-white shadow-sm"
-                    : "bg-primary text-primary-foreground"
+                  "flex items-start gap-3",
+                  message.role === "assistant" ? "justify-start" : "justify-end"
                 )}
               >
-                {message.content}
-              </div>
-              {message.role === "user" && (
-                <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gray-200">
-                  <User className="h-5 w-5 text-gray-600" />
+                {message.role === "assistant" && (
+                  <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary text-primary-foreground">
+                    <Bot className="h-5 w-5" />
+                  </div>
+                )}
+                <div
+                  className={cn(
+                    "max-w-[80%] rounded-2xl px-4 py-3",
+                    message.role === "assistant"
+                      ? "bg-white shadow-sm"
+                      : "bg-primary text-primary-foreground"
+                  )}
+                >
+                  <div className="whitespace-pre-wrap break-words">
+                    {message.content}
+                  </div>
                 </div>
-              )}
+                {message.role === "user" && (
+                  <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gray-200">
+                    <User className="h-5 w-5 text-gray-600" />
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </ScrollArea>
+
+        {/* 输入区域 */}
+        <div className="border-t bg-white p-4">
+          <div className="mx-auto max-w-3xl">
+            <div className="flex items-center gap-2 rounded-xl border bg-white p-2 shadow-sm">
+              <Input
+                className="flex-1 border-0 bg-transparent focus-visible:ring-0"
+                placeholder="输入消息..."
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault()
+                    handleSend()
+                  }
+                }}
+                disabled={isLoading}
+              />
+              <Button 
+                size="icon"
+                className="h-9 w-9 rounded-lg"
+                onClick={handleSend}
+                disabled={isLoading}
+              >
+                <Send className="h-4 w-4" />
+              </Button>
             </div>
-          ))}
-        </div>
-      </ScrollArea>
-      
-      {/* 输入区域 */}
-      <div className="border-t bg-white p-4">
-        <div className="mx-auto max-w-3xl">
-          <div className="flex items-center gap-2 rounded-xl border bg-white p-2 shadow-sm">
-            <Button variant="ghost" size="icon" className="text-gray-400 hover:text-gray-600">
-              <Plus className="h-5 w-5" />
-            </Button>
-            <Input
-              className="flex-1 border-0 bg-transparent focus-visible:ring-0"
-              placeholder="输入消息..."
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault()
-                  handleSend()
-                }
-              }}
-              disabled={isLoading}
-            />
-            <Button 
-              size="icon"
-              className="h-9 w-9 rounded-lg"
-              onClick={handleSend}
-              disabled={isLoading}
-            >
-              <Send className="h-4 w-4" />
-            </Button>
           </div>
         </div>
       </div>
